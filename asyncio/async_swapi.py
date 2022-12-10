@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, Integer, String
-from more_itertools import chunked
+
 
 PG_DSN = 'postgresql+asyncpg://app:1234@127.0.0.1:5431/async'
 engine = create_async_engine(PG_DSN)
@@ -33,99 +33,68 @@ class Person(Base):
     vehicles = Column(String, nullable=True)
 
 
-async def chunked_async(async_iter, size):
-    buffer = []
-    while True:
-        try:
-            item = await async_iter.__anext__()
-        except StopAsyncIteration:
-            break
-        buffer.append(item)
-        if len(buffer) == size:
-            yield buffer
-            buffer = []
+class PageNotFound(Exception):
+    pass
 
 
-async def get_people_amount():
-    print(f'begin people amount get')
+async def get_page(page_number: int) -> dict:
     async with ClientSession() as session:
-        response = await session.get(f'https://swapi.dev/api/people/')
-        json_data = await response.json()
-        amount = json_data['count']
-    print(f'end people amount')
-    return amount
+        response = await session.get(f'https://swapi.dev/api/people/?page={page_number}')
+        if response.status == 200:
+            page_data = await response.json()
+            return page_data
+    raise PageNotFound
 
 
-async def get_person(person_id):
-    print(f'begin {person_id}')
-    async with ClientSession() as session:
-        response = await session.get(f'https://swapi.dev/api/people/{person_id}')
-        json_data = await response.json()
+def parse_page(page: dict) -> list:
+    page_people = []
+    for item in page["results"]:
         peoples_dict = dict()
-        if 'detail' not in json_data:
-            peoples_dict['id'] = person_id
-            peoples_dict['name'] = json_data['name']
-            peoples_dict['birth_year'] = json_data['birth_year']
-            peoples_dict['eye_color'] = json_data['eye_color']
-            peoples_dict['films'] = ", ".join(json_data['films'])
-            peoples_dict['gender'] = json_data['gender']
-            peoples_dict['height'] = json_data['height']
-            peoples_dict['hair_color'] = json_data['hair_color']
-            peoples_dict['homeworld'] = json_data['homeworld']
-            peoples_dict['mass'] = json_data['mass']
-            peoples_dict['skin_color'] = json_data['skin_color']
-            peoples_dict['species'] = ", ".join(json_data['species'])
-            peoples_dict['starships'] = ", ".join(json_data['starships'])
-            peoples_dict['vehicles'] = ", ".join(json_data['vehicles'])
-    print(f'end {person_id}')
-    return peoples_dict
+        peoples_dict['name'] = item['name']
+        peoples_dict['birth_year'] = item['birth_year']
+        peoples_dict['eye_color'] = item['eye_color']
+        peoples_dict['films'] = ", ".join(item['films'])
+        peoples_dict['gender'] = item['gender']
+        try:
+            height = int(item["height"])
+        except ValueError:
+            height = None
+        peoples_dict['height'] = height
+        peoples_dict['hair_color'] = item['hair_color']
+        peoples_dict['homeworld'] = item['homeworld']
+        try:
+            mass = int(item["mass"])
+        except ValueError:
+            mass = None
+        peoples_dict['mass'] = mass
+        peoples_dict['skin_color'] = item['skin_color']
+        peoples_dict['species'] = ", ".join(item['species'])
+        peoples_dict['starships'] = ", ".join(item['starships'])
+        peoples_dict['vehicles'] = ", ".join(item['vehicles'])
+        peoples_dict["id"] = int(item["url"].split("/")[-2])
+        page_people.append(peoples_dict)
+    return page_people
 
 
-async def get_people():
-    coroutines = []
-    amount = await get_people_amount()
-    for i in range(1, amount + 1):
-        coroutines.append(get_person(person_id=i))
-    results = await asyncio.gather(*coroutines)
-    for item in results:
-        print(item)
-        yield item
-
-    # coroutines = []
-    # amount = await get_people_amount()
-    # for i in range(1, amount + 1):
-    #     coroutines.append(get_person(person_id=i))
-    # results = await asyncio.gather(*coroutines)
-    # for item in results:
-    #     yield item
-
-
-async def insert_people(people_chunk):
-    async with Session() as session:
-        for item in people_chunk:
-            session.add(Person(**item))
-        # session.add_all([Person(id='id',
-        #                         name='name',
-        #                         birth_year='birth_year',
-        #                         eye_color='eye_color',
-        #                         films='films',
-        #                         gender='gender',
-        #                         height='height',
-        #                         homeworld='homeworld',
-        #                         mass='mass',
-        #                         skin_color='skin_color',
-        #                         species='species',
-        #                         starships='starships',
-        #                         vehicles='vehicles') for item in people_chunk])
-        await session.commit()
+async def load_all_people() -> list:
+    result = []
+    try:
+        page_number = 1
+        while True:
+            page = await get_page(page_number)
+            page_number += 1
+            people = parse_page(page)
+            result += people
+    except PageNotFound:
+        return result
 
 
 async def main():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.commit()
-
-    async for item in get_people():
+    for item in await load_all_people():
+        print(item)
         async with Session() as session:
             session.add(Person(id=item['id'],
                                name=item['name'],
@@ -133,10 +102,10 @@ async def main():
                                eye_color=item['eye_color'],
                                films=item['films'],
                                gender=item['gender'],
-                               height=int(item['height']),
+                               height=item['height'],
                                hair_color=item['hair_color'],
                                homeworld=item['homeworld'],
-                               mass=int(item['mass']),
+                               mass=item['mass'],
                                skin_color=item['skin_color'],
                                species=item['species'],
                                starships=item['starships'],
